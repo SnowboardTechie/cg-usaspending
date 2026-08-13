@@ -107,6 +107,46 @@ Records are validated after a JSON round-trip rather than in memory. Date-bearin
 fields hold `Date` values until `toJSON` converts them to protocol strings, so
 validating the in-memory objects would check a shape no consumer ever sees.
 
+## Fetching strategy
+
+Neither API can be queried by funding opportunity number, so each side is fetched
+a different way.
+
+**USAspending is sampled.** The opportunity number appears only on the per-award
+detail response, and the search endpoint does not accept it as a filter or return
+it as a field. There is no way to ask for awards by opportunity number, so the
+script pages through awards and reads each detail record.
+
+**Simpler.Grants.gov is queried once per distinct opportunity number.** Lookups
+run four at a time and each returns a page of 25 results, scanned for an exact
+match. Results are cached to `opportunity-cache.json`, misses included, so
+repeat runs issue no queries at all. On the default sample that is 64 queries
+covering 155 awards, since one opportunity accounts for many awards.
+
+Querying per number looks wasteful next to a single bulk export, so the export
+was built and measured against the same 155-award candidate set. It pulled
+opportunities bounded by close date and agency and matched them locally.
+
+|                                 | per-number queries     | bounded export       |
+| ------------------------------- | ---------------------- | -------------------- |
+| opportunity numbers matched     | 37 of 64               | 16 of 64             |
+| awards emitted                  | 84                     | 37                   |
+| requests                        | 64, run four at a time | 43 pages, sequential |
+| serialized round-trips          | 16                     | 43                   |
+| opportunity records transferred | under 1600             | 4275                 |
+
+The export matched fewer numbers and took longer. Two things account for it.
+
+Recall drops because the export's filters exclude opportunities the per-number
+query finds. The numbers it missed were NSF program solicitations such as
+`21-552` and `22-541`, which fits those opportunities having no single close
+date and therefore falling outside a `closeDateRange` filter.
+
+Latency is higher because an export is not one request. The SDK paginates in a
+sequential loop, so 4275 opportunities at 100 per page is 43 round-trips in
+series, while 64 queries at four-way concurrency is 16. The export also moves
+roughly three times the data to return less of it.
+
 ## Layout
 
 ```

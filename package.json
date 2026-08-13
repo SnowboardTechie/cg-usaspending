@@ -1,0 +1,28 @@
+{
+  "name": "sgg-usaspending-awards",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Joins Simpler.Grants.gov opportunities to USAspending assistance awards and emits CommonGrants AwardBase records",
+  "license": "MIT",
+  "packageManager": "pnpm@10.34.3",
+  "scripts": {
+    "fetch:candidates": "tsx src/index.ts fetch-candidates",
+    "build:awards": "tsx src/index.ts build",
+    "validate:awards": "tsx src/index.ts validate",
+    "check:types": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@common-grants/cg-grants-gov": "^0.3.1",
+    "@common-grants/sdk": "^0.6.0",
+    "ajv": "^8.17.1",
+    "ajv-formats": "^3.0.1",
+    "yaml": "^2.8.1",
+    "zod": "3.25.76"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.1",
+    "tsx": "^4.20.6",
+    "typescript": "^5.9.3"
+  }
+}

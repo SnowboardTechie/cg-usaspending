@@ -17,7 +17,11 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { loadConfig, type Config } from "./config.js";
 import { collectCandidates, type CandidateSet } from "./fetch/usaspending.js";
-import { createOpportunityResolver } from "./fetch/sgg.js";
+import {
+  auditMisses,
+  deriveExportWindow,
+  loadOpportunityIndex,
+} from "./fetch/sgg.js";
 import { joinAwardsToOpportunities } from "./transform/join.js";
 import { toAwardBase } from "./transform/award.js";
 import {
@@ -162,24 +166,65 @@ async function build(config: Config): Promise<boolean> {
 
   if (!config.sggApiKey) {
     console.log(
-      "\nSGG_API_KEY is not set; opportunity lookups will come from cache only.",
+      "\nSGG_API_KEY is not set; the run needs a matching export already on disk.",
     );
   }
+
+  const window = deriveExportWindow(config, candidates);
 
   console.log(
     `\nResolving ${candidates.opportunityNumbers.length} opportunity numbers against ${config.sggBaseUrl}`,
   );
-  const resolver = createOpportunityResolver(config);
-  const join = await joinAwardsToOpportunities(
-    candidates,
-    resolver,
-    config.targetAwardCount,
+  console.log(
+    `  export window: closeDate ${window.closeDateRange.min} to ${window.closeDateRange.max}` +
+      (window.agencies.length > 0
+        ? `, agencies ${window.agencies.join("/")}`
+        : ", all agencies"),
   );
 
+  const index = await loadOpportunityIndex(config, window);
+  console.log(
+    `  exported ${index.exported} opportunities, ${index.indexed} with an opportunity number` +
+      (index.fromCache ? " (reused; set REFRESH_EXPORT=1 to re-export)" : ""),
+  );
+  if (index.truncated) {
+    console.log(
+      `  the export stopped at SGG_EXPORT_MAX_ITEMS (${config.sggExportMaxItems}); coverage is incomplete`,
+    );
+  }
+
+  const join = joinAwardsToOpportunities(
+    candidates,
+    index,
+    config.targetAwardCount,
+  );
   console.log(`  matched:   ${join.matchedNumbers.length} opportunity numbers`);
   console.log(
-    `  unmatched: ${join.unmatchedNumbers.length} opportunity numbers`,
+    `  unmatched: ${join.unmatchedNumbers.length} opportunity numbers` +
+      (join.unmatchedNumbers.length > 0
+        ? " (absent from Simpler.Grants.gov, or outside the export window)"
+        : ""),
   );
+  // A miss from an export is ambiguous, so a bounded sample of them is re-checked
+  // with a targeted search. Recovering any means the window is too tight.
+  const audit = await auditMisses(
+    config,
+    join.unmatchedNumbers,
+    config.sggAuditMisses,
+  );
+  if (audit.checked > 0) {
+    console.log(
+      `  audit: re-checked ${audit.checked} unmatched number(s) with a direct search, ` +
+        `${audit.recovered.length} were recoverable`,
+    );
+    if (audit.recovered.length > 0) {
+      console.log(
+        `    the export is missing real matches; widen SGG_CLOSE_DATE_START or clear SGG_AGENCIES`,
+      );
+      console.log(`    recoverable: ${audit.recovered.slice(0, 5).join(", ")}`);
+    }
+  }
+
   console.log(
     `  ${join.matchedAwardCount} awards joined` +
       (join.selected.length < join.matchedAwardCount
@@ -222,7 +267,17 @@ async function build(config: Config): Promise<boolean> {
         awardTypeCodes: config.awardTypeCodes,
         timePeriod: config.timePeriod,
       },
-      simplerGrantsGov: { baseUrl: config.sggBaseUrl },
+      simplerGrantsGov: {
+        baseUrl: config.sggBaseUrl,
+        exportWindow: window,
+        opportunitiesExported: index.exported,
+        opportunitiesIndexed: index.indexed,
+        exportTruncated: index.truncated,
+        missAudit: {
+          checked: audit.checked,
+          recovered: audit.recovered,
+        },
+      },
     },
     options: {
       opportunityIdentifiers: config.opportunityIdentifiers,

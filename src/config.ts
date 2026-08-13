@@ -40,6 +40,19 @@ export interface Config {
   sggApiKey: string | undefined;
   /** Header the API key is sent in. */
   sggAuthHeader: string;
+  /** Ceiling on opportunities pulled by the export. */
+  sggExportMaxItems: number;
+  /**
+   * How many unmatched numbers to re-check with a targeted search.
+   *
+   * A bounded audit that measures whether the export is losing real matches.
+   * Set to 0 to skip it.
+   */
+  sggAuditMisses: number;
+  /** Overrides for the derived export window. */
+  sggCloseDateStart: string | undefined;
+  sggCloseDateEnd: string | undefined;
+  sggAgencies: string[] | undefined;
   /** Base URL of the USAspending API. */
   usaSpendingBaseUrl: string;
   /** Toptier awarding agency names to sample from. */
@@ -100,6 +113,15 @@ function list(name: string, fallback: string[]): string[] {
   return items;
 }
 
+function optionalList(name: string): string[] | undefined {
+  const raw = process.env[name];
+  if (raw === undefined) return undefined;
+  return raw
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+}
+
 function opportunityIdentifiersMode(): "include" | "omit" {
   const raw = process.env.OPPORTUNITY_IDENTIFIERS ?? "omit";
   if (raw !== "include" && raw !== "omit") {
@@ -116,6 +138,12 @@ export function loadConfig(): Config {
     sggBaseUrl: process.env.SGG_BASE_URL ?? "https://api.simpler.grants.gov",
     sggApiKey: process.env.SGG_API_KEY,
     sggAuthHeader: process.env.SGG_AUTH_HEADER ?? "X-API-Key",
+    sggExportMaxItems: int("SGG_EXPORT_MAX_ITEMS", 20000),
+    sggAuditMisses:
+      process.env.SGG_AUDIT_MISSES === "0" ? 0 : int("SGG_AUDIT_MISSES", 10),
+    sggCloseDateStart: process.env.SGG_CLOSE_DATE_START,
+    sggCloseDateEnd: process.env.SGG_CLOSE_DATE_END,
+    sggAgencies: optionalList("SGG_AGENCIES"),
     usaSpendingBaseUrl:
       process.env.USASPENDING_BASE_URL ?? "https://api.usaspending.gov",
     agencies: list("USASPENDING_AGENCIES", DEFAULT_AGENCIES),

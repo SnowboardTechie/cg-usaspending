@@ -10,14 +10,13 @@
  * than the first one or two programs.
  */
 
-import { mapWithConcurrency } from "../concurrency.js";
-import type { OpportunityResolver, ResolvedOpportunity } from "../fetch/sgg.js";
+import {
+  findOpportunity,
+  type OpportunityIndex,
+  type ResolvedOpportunity,
+} from "../fetch/sgg.js";
 import type { AwardDetail, CandidateSet } from "../fetch/usaspending.js";
 import { opportunityNumberOf } from "../fetch/usaspending.js";
-
-/** Concurrent lookups against Simpler.Grants.gov. Kept low deliberately: this is
- * a shared public API and the candidate pool is small. */
-const LOOKUP_CONCURRENCY = 4;
 
 export interface JoinedPair {
   award: AwardDetail;
@@ -29,9 +28,9 @@ export interface JoinResult {
   selected: JoinedPair[];
   /** Awards whose opportunity number matched, before any cap. */
   matchedAwardCount: number;
-  /** Opportunity numbers that resolved to a Simpler.Grants.gov opportunity. */
+  /** Opportunity numbers found in the export. */
   matchedNumbers: string[];
-  /** Opportunity numbers Simpler.Grants.gov has no opportunity for. */
+  /** Opportunity numbers the export has no entry for. */
   unmatchedNumbers: string[];
 }
 
@@ -74,38 +73,33 @@ function drawRoundRobin(
 }
 
 /**
- * Resolves every candidate opportunity number, then joins.
+ * Joins candidates against the opportunity index.
  *
  * `targetCount` is an optional cap. Undefined emits every joined award.
  */
-export async function joinAwardsToOpportunities(
+export function joinAwardsToOpportunities(
   candidates: CandidateSet,
-  resolver: OpportunityResolver,
+  index: OpportunityIndex,
   targetCount?: number,
-): Promise<JoinResult> {
-  const resolutions = await mapWithConcurrency(
-    candidates.opportunityNumbers,
-    LOOKUP_CONCURRENCY,
-    async (number) => ({ number, opportunity: await resolver.resolve(number) }),
-  );
-  await resolver.flush();
-
-  const byNumber = new Map<string, ResolvedOpportunity>();
+): JoinResult {
+  const matched = new Map<string, ResolvedOpportunity>();
   const unmatchedNumbers: string[] = [];
-  for (const { number, opportunity } of resolutions) {
-    if (opportunity) byNumber.set(number, opportunity);
+
+  for (const number of candidates.opportunityNumbers) {
+    const opportunity = findOpportunity(index, number);
+    if (opportunity) matched.set(number, opportunity);
     else unmatchedNumbers.push(number);
   }
 
   const matchedAwards = candidates.withOpportunityNumber.filter((award) =>
-    byNumber.has(opportunityNumberOf(award)),
+    matched.has(opportunityNumberOf(award)),
   );
 
   const limit = targetCount ?? Number.POSITIVE_INFINITY;
   const selected = drawRoundRobin(groupByNumber(matchedAwards), limit).map(
     (award) => ({
       award,
-      opportunity: byNumber.get(
+      opportunity: matched.get(
         opportunityNumberOf(award),
       ) as ResolvedOpportunity,
     }),
@@ -114,7 +108,7 @@ export async function joinAwardsToOpportunities(
   return {
     selected,
     matchedAwardCount: matchedAwards.length,
-    matchedNumbers: [...byNumber.keys()].sort(),
+    matchedNumbers: [...matched.keys()].sort(),
     unmatchedNumbers: unmatchedNumbers.sort(),
   };
 }

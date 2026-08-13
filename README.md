@@ -32,6 +32,12 @@ pnpm install
 | `CANDIDATES_PER_AGENCY`        | `15`                                    | Awards pulled per agency, per sort order (two orders are used).                                 |
 | `TARGET_AWARD_COUNT`           | unset                                   | Optional cap on emitted awards. Unset emits every joined award.                                 |
 | `CONCURRENCY`                  | `8`                                     | Max in-flight requests to USAspending.                                                          |
+| `SGG_CLOSE_DATE_START`         | derived                                 | Override the export window's opening date. Widen it to cover older awards.                      |
+| `SGG_CLOSE_DATE_END`           | derived                                 | Override the export window's closing date.                                                      |
+| `SGG_AGENCIES`                 | derived                                 | Comma-separated agency codes for the export filter. Set to a single space to disable it.        |
+| `SGG_EXPORT_MAX_ITEMS`         | `20000`                                 | Ceiling on opportunities pulled by the export.                                                  |
+| `SGG_AUDIT_MISSES`             | `10`                                    | Unmatched numbers to re-check with a direct search. `0` skips the audit.                        |
+| `REFRESH_EXPORT`               | unset                                   | Set to `1` to re-export instead of reusing `opportunity-export.json`.                           |
 | `OPPORTUNITY_IDENTIFIERS`      | `omit`                                  | `include` to emit `opportunity.identifiers`, which the current schema rejects. See below.       |
 | `REFRESH_CANDIDATES`           | unset                                   | Set to `1` to re-sample USAspending instead of reusing stage 1 output.                          |
 | `CG_SCHEMA_DIR`                | unset                                   | Local CommonGrants YAML schema directory. Schemas are fetched from commongrants.org when unset. |
@@ -66,12 +72,10 @@ Output lands in `out/`:
 | `awards.json`                 | The sample of CommonGrants `AwardBase` records.                                                                               |
 | `report.json`                 | Run metadata, the stage-by-stage funnel, which opportunity numbers matched, and any validation failures or known schema gaps. |
 | `usaspending-candidates.json` | Raw USAspending award records from stage 1.                                                                                   |
-| `opportunity-cache.json`      | Opportunity number to opportunity, including confirmed misses.                                                                |
+| `opportunity-export.json`     | The exported opportunities and the window they were taken with. Reused when the window matches.                               |
 
-Lookups are cached by opportunity number, misses included. A number that
-Simpler.Grants.gov does not have is a stable fact, so caching it keeps repeat
-runs from re-searching for it. Once the cache covers every candidate, the
-pipeline runs without an API key.
+Once an export is on disk the pipeline runs without an API key, which is how the
+join and transform stages can be exercised offline.
 
 ## How the pipeline works
 
@@ -83,11 +87,24 @@ whose opportunity number is missing, or is one of the placeholder values
 agencies submit in its place (`NOT APPLICABLE`, `N/A`, and similar), are dropped
 here.
 
-**Stage 2, resolve against Simpler.Grants.gov.** The CommonGrants search API has
-no filter for the opportunity number either, so each distinct number becomes a
-free-text search. Text search returns near matches, so a hit only counts when the
-opportunity's own `federalOpportunityNumber` equals the number being looked up,
-compared case-insensitively after trimming.
+**Stage 2, export opportunities.** There is no filter for the opportunity number
+here either, so rather than querying once per number, the script exports a batch
+of opportunities bounded by close date and agency and indexes them by number. One
+paged export replaces N queries, and matching is an exact comparison against
+`federalOpportunityNumber` (case-insensitive, trimmed) rather than an
+interpretation of search ranking.
+
+The tradeoff is coverage: a number outside the export cannot match. The window is
+derived from the awards being joined rather than pinned to the current year,
+because the opportunity an award references is older than the award. In one
+155-award sample only 26% were signed in 2025, while 99% were signed in 2015 or
+later, so a 2025 window would have missed most of the set. Spanning the sample's
+own signing dates keeps every candidate eligible.
+
+The export is written to `opportunity-export.json` along with the window it was
+taken with, and reused when the window matches. Changing the window rebuilds
+automatically rather than answering from the wrong bounds. `REFRESH_EXPORT=1`
+forces a re-export.
 
 **Stage 3, join.** Every award whose opportunity number resolved is emitted. One
 opportunity can account for dozens of awards, one per recipient, so awards are
@@ -142,6 +159,28 @@ That subclass is internal, so the only way to obtain one is to parse through
 `ISODateSchema`. `transform/dates.ts` routes all date construction through the
 SDK's parsers for that reason, and passes parsed values along untouched, since
 `new Date(value)` or `structuredClone` would lose the behavior.
+
+## Match quality
+
+Precision does not depend on the export. A hit only counts when the
+opportunity's own `federalOpportunityNumber` equals the number being looked up,
+so there are no fuzzy joins.
+
+Recall is where an export can quietly lose matches: a number outside the window,
+an agency filter that excludes sub-agency coding like `HHS-NIH`, an opportunity
+with no close date, or the export hitting its item cap. Rather than assume, each
+run re-checks a bounded sample of unmatched numbers with a direct search and
+reports how many were recoverable:
+
+```
+audit: re-checked 10 unmatched number(s) with a direct search, 0 were recoverable
+```
+
+Zero recoverable means the misses are genuinely absent from Simpler.Grants.gov
+rather than artifacts of the window. Anything above zero means the export is
+losing real matches, and the run says so and points at the knobs to widen. A
+truncated export is reported the same way, so a capped run never reads as a
+complete one.
 
 ## Field mapping
 
